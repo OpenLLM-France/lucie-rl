@@ -1,31 +1,33 @@
+import sys
 import re
+import json
 import torch
 from datasets import load_dataset, Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from trl import GRPOConfig, GRPOTrainer
+from gsm8k_rewards import gsm8k_reward_fn
 
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = """
     Solve the mathematical question given below.
-    First think about the reasoning process and then provide the user with the answer. 
-    The reasoning process and answer should be enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e.,
-    <think> reasoning process here </think><answer> answer here </answer>
+    Provide a clear, logical progression of steps leading to the solution. Each step should be articulated in natural language, detailing the calculations or reasoning applied.
+    For each calculation, include the arithmetic expression followed by its result. Enclose the expression and result within double angle brackets (<< >>) to denote calculator annotations.
+    Example: 48 / 2 = <<48 / 2 = 24>>24
+    Conclude the solution with the final numeric answer on a new line, preceded by the delimiter ####.
+    Example: #### 72
 """
 
 dataset = load_dataset('openai/gsm8k', 'main')
 train_dataset = dataset['train']
 test_dataset = dataset['test']
 
-
 def extract_final_answer(text):
     if "####" not in text:
-        return None
-    return text.split("####")[1].strip()
+        return ''
+    t = text.split("####")[1].strip()
+    t = t.split(' ')[0].strip()
+    return t
 
-def extract_xml_answer(text):
-    answer = text.split("<answer>")[-1]
-    answer = answer.split("</answer>")[0]
-    return answer.strip()
 
 def get_prompts(example):
     return {
@@ -41,50 +43,22 @@ train_dataset = train_dataset.map(get_prompts)
 test_dataset = test_dataset.map(get_prompts)
 
 
+logfile = open('generation.log', 'w')
 
-# Reward functions
-def correctness_reward_func(completions, **kwargs):
-    """Rewards 2.0 if the extracted response exactly matches the expected answer, otherwise 0.0."""
-    solutions = kwargs["solution"]  # Expected answers from kwargs
+def logger(completions, **kwargs):
     responses = [completion[0]["content"] for completion in completions]
-    extracted_responses = [extract_xml_answer(r) for r in responses]
-    return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, solutions)]
+    answers = [ v for v in kwargs["answer"]]
+    questions = [ v for v in kwargs["question"]]
+    for i in range(len(responses)):
+        s = json.dumps({
+            'question': questions[i],
+            'answer': answers[i],
+            'response': responses[i],
+            'solution': kwargs['solution'][i]
+        }, ensure_ascii=False)
+        logfile.write(s + '\n')
+    return [ 0.0 for v in responses ]
 
-def isnumber_reward_func(completions, **kwargs):
-    """Rewards 0.5 if the extracted response is a valid number, otherwise 0.0."""
-    responses = [completion[0]["content"] for completion in completions]
-    extracted_responses = [extract_xml_answer(r) for r in responses]
-    return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
-
-def strict_format_reward_func(completions, **kwargs):
-    """Rewards 0.5 if the completion strictly follows the format: <think>...</think><answer>...</answer>."""
-    pattern = r"^<think>\n.*?\n</think>\n<answer>\n.*?\n</answer>\n$"
-    responses = [completion[0]["content"] for completion in completions]
-    return [0.5 if re.match(pattern, r) else 0.0 for r in responses]
-
-def soft_format_reward_func(completions, **kwargs):
-    """Rewards 0.5 if the completion loosely follows the format: <think>...</think><answer>...</answer>."""
-    pattern = r"<think>.*?</think>\s*<answer>.*?</answer>"
-    responses = [completion[0]["content"] for completion in completions]
-    return [0.5 if re.search(pattern, r, re.DOTALL) else 0.0 for r in responses]
-
-def count_xml(text):
-    count = 0.0
-    if text.count("<think>\n") == 1:
-        count += 0.125
-    if text.count("\n</think>\n") == 1:
-        count += 0.125
-    if text.count("\n<answer>\n") == 1:
-        count += 0.125
-        count -= len(text.split("\n</answer>\n")[-1])*0.001
-    if text.count("\n</answer>") == 1:
-        count += 0.125
-        count -= (len(text.split("\n</answer>")[-1]) - 1)*0.001
-    return count
-
-def xmlcount_reward_func(completions, **kwargs):
-    contents = [completion[0]["content"] for completion in completions]
-    return [count_xml(c) for c in contents]
 
 model_name = 'OpenLLM-France/Lucie-7B-Instruct'
 output_dir = 'models'
@@ -109,7 +83,7 @@ training_args = GRPOConfig(
     save_steps=100,
     max_grad_norm=0.1,
     log_on_each_node=False,
-    report_to=["wandb","tensorboard"],
+    report_to=[], #"wandb","tensorboard"],
     logging_steps=1,
     use_vllm=True,
     vllm_gpu_memory_utilization=.25,
@@ -117,33 +91,42 @@ training_args = GRPOConfig(
     logging_dir = "./logs"
 )
 
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    torch_dtype="auto",
-    device_map="auto",
+quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+nf4_config = BitsAndBytesConfig(
+           load_in_4bit=True,
+           bnb_4bit_quant_type="nf4",
+           bnb_4bit_use_double_quant=True,
+           bnb_4bit_compute_dtype=torch.bfloat16
 )
 
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    attn_implementation="flash_attention_2",
+    torch_dtype="auto",
+    device_map="auto",
+    quantization_config=nf4_config #quantization_config
+)
+from peft import LoraConfig, get_peft_model
+
+lora_config = LoraConfig(
+    task_type="CAUSAL_LM",
+    r=8,
+    lora_alpha=32,
+    lora_dropout=0.1,
+    target_modules=["q_proj", "v_proj"],
+)
+
+model = get_peft_model(model, lora_config)
+
+model.print_trainable_parameters()
+
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-#tokenizer.pad_token = tokenizer.eos_token
-# Define new special tokens
-special_tokens = ["<think>", "</think>", "<answer>", "</answer>"]
-
-# Add them to tokenizer
-tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
-
-# Resize model embeddings to accommodate new tokens
-model.resize_token_embeddings(len(tokenizer))
 
 trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
-    reward_funcs=[
-        xmlcount_reward_func,
-        soft_format_reward_func,
-        strict_format_reward_func,
-        isnumber_reward_func,
-        correctness_reward_func],
+    reward_funcs=gsm8k_reward_fn + [ logger ],
     args=training_args,
-    train_dataset=train_dataset,
+    train_dataset=train_dataset
 )
 trainer.train()
