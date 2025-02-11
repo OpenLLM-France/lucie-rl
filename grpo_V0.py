@@ -6,6 +6,7 @@ from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from trl import GRPOConfig, GRPOTrainer
 from gsm8k_rewards import gsm8k_reward_fn
+import evaluate
 
 
 SYSTEM_PROMPT = """
@@ -59,6 +60,28 @@ def logger(completions, **kwargs):
         logfile.write(s + '\n')
     return [ 0.0 for v in responses ]
 
+rouge = evaluate.load('rouge')
+
+def reward_rouge1(completions, **kwargs):
+    answers = [ v for v in kwargs["answer"]]  # Expected answers from kwargs
+    responses = [ completion[0]["content"] for completion in completions ]
+    return [ rouge.compute(predictions=[r], references=[a])['rouge1'] for r, a in zip(responses, answers)]
+
+def reward_rouge2(completions, **kwargs):
+    answers = [ v for v in kwargs["answer"]]  # Expected answers from kwargs
+    responses = [ completion[0]["content"] for completion in completions ]
+    return [ rouge.compute(predictions=[r], references=[a])['rouge2'] for r, a in zip(responses, answers)]
+
+def reward_rougel(completions, **kwargs):
+    answers = [ v for v in kwargs["answer"]]  # Expected answers from kwargs
+    responses = [ completion[0]["content"] for completion in completions ]
+    return [ rouge.compute(predictions=[r], references=[a])['rougeL'] for r, a in zip(responses, answers)]
+
+def reward_rougelsum(completions, **kwargs):
+    answers = [ v for v in kwargs["answer"]]  # Expected answers from kwargs
+    responses = [ completion[0]["content"] for completion in completions ]
+    return [ rouge.compute(predictions=[r], references=[a])['rougeLsum'] for r, a in zip(responses, answers)]
+
 
 model_name = 'OpenLLM-France/Lucie-7B-Instruct'
 output_dir = 'models'
@@ -91,20 +114,20 @@ training_args = GRPOConfig(
     logging_dir = "./logs"
 )
 
-quantization_config = BitsAndBytesConfig(load_in_8bit=True)
-nf4_config = BitsAndBytesConfig(
-           load_in_4bit=True,
-           bnb_4bit_quant_type="nf4",
-           bnb_4bit_use_double_quant=True,
-           bnb_4bit_compute_dtype=torch.bfloat16
-)
+#quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+#nf4_config = BitsAndBytesConfig(
+#           load_in_4bit=True,
+#           bnb_4bit_quant_type="nf4",
+#           bnb_4bit_use_double_quant=True,
+#           bnb_4bit_compute_dtype=torch.bfloat16
+#)
 
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     attn_implementation="flash_attention_2",
     torch_dtype="auto",
     device_map="auto",
-    quantization_config=nf4_config #quantization_config
+    #quantization_config=nf4_config #quantization_config
 )
 from peft import LoraConfig, get_peft_model
 
@@ -125,7 +148,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
-    reward_funcs=gsm8k_reward_fn + [ logger ],
+    reward_funcs=gsm8k_reward_fn + [ logger, reward_rouge1, reward_rouge2, reward_rougel, reward_rougelsum ],
     args=training_args,
     train_dataset=train_dataset
 )
