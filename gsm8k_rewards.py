@@ -43,7 +43,8 @@ def extract_calculations(s: str) -> str:
             t = ''
             i += 2
             while i < len(s) and s[i] not in [ '>' ]:
-                t += s[i]
+                if s[i] not in [ ' ', '\t', '\n' ]:
+                    t += s[i]
                 i += 1
             lst.append(t)
             continue
@@ -56,7 +57,7 @@ def iou(a, b):
     intersection = set.intersection(set(a), set(b))
     union = set.union(set(a), set(b))
     if 0 == len(union):
-        return 0
+        return 1.0
     return float(len(intersection)) / len(union)
 
 
@@ -147,6 +148,19 @@ if __name__ == '__main__':
                     sys.stderr.write(f'{s} != {i}\n')
             except Exception as e:
                 sys.stderr.write(f'ERROR: {e} on {item["answer"]}\n')
+
+            try:
+                l = reward_compare_calculations(
+                    [ [ {'content': item['answer']} ] ], **{
+                    'question': [ item['question'] ],
+                    'answer': [ item['answer'] ],
+                    'solution': [ extract_solution_int(item['answer']) ]
+                })
+                for v in l:
+                    if 1.0 != v:
+                        raise
+            except Exception as e:
+                sys.stderr.write(f'ERROR: {e} on \"{item["answer"]}\" with compare_calculations\n')
 
     test_rewards_on_log('generation.log', gsm8k_reward_fn)
 
