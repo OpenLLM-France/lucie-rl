@@ -35,6 +35,31 @@ def extract_final_answer_str(s: str) -> str:
         return ''
 
 
+def extract_calculations(s: str) -> str:
+    lst = []
+    i = 0
+    while i < len(s):
+        if i+1 < len(s) and '<' == s[i] and '<' == s[i+1]:
+            t = ''
+            i += 2
+            while i < len(s) and s[i] not in [ '>' ]:
+                t += s[i]
+                i += 1
+            lst.append(t)
+            continue
+        i += 1
+
+    return sorted(lst)
+
+
+def iou(a, b):
+    intersection = set.intersection(set(a), set(b))
+    union = set.union(set(a), set(b))
+    if 0 == len(union):
+        return 0
+    return float(len(intersection)) / len(union)
+
+
 def reward_has_final_answer(completions, **kwargs):
     responses = [completion[0]["content"] for completion in completions]
     delimiter_present = ['####' in r for r in responses]
@@ -63,11 +88,18 @@ def reward_soft_correctness(completions, **kwargs):
     return [1.0 if (str(a) in all_numbers(r) or str(a).replace(',', '') in all_numbers(r)) else 0.0 for r, a in zip(responses, solutions)]
 
 
-reward_fn = [
+def reward_compare_calculations(completions, **kwargs):
+    answers = [ extract_calculations(v) for v in kwargs["answer"]]  # Expected answers from kwargs
+    responses = [ extract_calculations(completion[0]["content"]) for completion in completions ]
+    return [ iou(r, a) for r, a in zip(responses, answers)]
+
+
+gsm8k_reward_fn = [
     reward_has_final_answer,
     reward_isnumber,
     reward_soft_correctness,
-    reward_strict_correctness
+    reward_strict_correctness,
+    reward_compare_calculations
 ]
 
 def test_rewards_on_log(file_name, reward_fn):
@@ -116,5 +148,5 @@ if __name__ == '__main__':
             except Exception as e:
                 sys.stderr.write(f'ERROR: {e} on {item["answer"]}\n')
 
-    test_rewards_on_log('generation.log', reward_fn)
+    test_rewards_on_log('generation.log', gsm8k_reward_fn)
 
