@@ -4,12 +4,16 @@ import re
 
 def all_numbers(s: str) -> list[str]:
     lst = [ v[0] for v in re.findall(r'([-]?\d+([\,]\d+)*)', s) ]
-    return lst
+    lst_no_comma = []
+    for item in lst:
+        if ',' in item:
+            lst_no_comma.append(item.replace(',', ''))
+    return lst + lst_no_comma
 
 
 def extract_solution_str(s: str) -> str:
     lines = re.split(r'\n', s)
-    mo = re.match(r'^####\s+([-]?\d+([\,]\d+)*)\s*$', lines[-1])
+    mo = re.match(r'^####\s+([\-]?\d+([\,]\d+)*)\s*$', lines[-1])
     if mo is None:
         raise
     return mo.group(1).strip()
@@ -70,7 +74,7 @@ def reward_has_final_answer(completions, **kwargs):
 def reward_isnumber(completions, **kwargs):
     """Rewards 0.5 if the extracted response is a valid number, otherwise 0.0."""
     responses = [completion[0]["content"] for completion in completions]
-    extracted_responses = [extract_final_answer_str(r) for r in responses]
+    extracted_responses = [extract_final_answer_str(r).replace(',', '').lstrip('-') for r in responses]
     return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
 
 
@@ -159,6 +163,23 @@ if __name__ == '__main__':
                 for v in l:
                     if 1.0 != v:
                         raise
+
+                scores = []
+                for fn in gsm8k_reward_fn:
+                    v = fn(
+                        [ [ {'content': item['answer']} ] ], **{
+                        'question': [ item['question'] ],
+                        'answer': [ item['answer'] ],
+                        'solution': [ extract_solution_int(item['answer']) ]
+                    })
+                    scores.extend(v)
+
+                score = sum(scores)
+                if 5.0 != score:
+                    raise
+                #txt = item["answer"].replace('\n', ' ')
+                #print(f'{score} {scores} {txt}')
+
             except Exception as e:
                 sys.stderr.write(f'ERROR: {e} on \"{item["answer"]}\" with compare_calculations\n')
 
