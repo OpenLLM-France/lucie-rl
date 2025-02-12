@@ -12,7 +12,7 @@ def all_numbers(s: str) -> list[str]:
 
 
 def extract_solution_str(s: str) -> str:
-    lines = re.split(r'\n', s)
+    lines = re.split(r'\n', s.rstrip('\n').rstrip(' '))
     mo = re.match(r'^####\s+([\-]?\d+([\,]\d+)*)\s*$', lines[-1])
     if mo is None:
         raise
