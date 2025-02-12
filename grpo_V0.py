@@ -2,6 +2,8 @@ import sys
 import re
 import json
 import torch
+import copy
+import random
 from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from trl import GRPOConfig, GRPOTrainer
@@ -30,11 +32,20 @@ def extract_final_answer(text):
     return t
 
 
+train_raw = copy.deepcopy(list(train_dataset))
+
 def get_prompts(example):
+    shots = []
+    for item in random.sample(train_raw, 6):
+        if item['question'] != example['question']:
+            shots.append(f'Question: {item["question"]}\nAnswer: {item["answer"]}\n')
+
+    system_prompt = shots[0]
+
     return {
         'prompt': [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": example["question"]},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f'Question: {example["question"]}\nAnswer: '},
         ],
         'solution': extract_final_answer(example['answer'])
     }
@@ -42,7 +53,6 @@ def get_prompts(example):
 
 train_dataset = train_dataset.map(get_prompts)
 test_dataset = test_dataset.map(get_prompts)
-
 
 logfile = open('generation.log', 'w')
 
