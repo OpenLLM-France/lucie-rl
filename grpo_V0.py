@@ -40,7 +40,7 @@ def get_prompts(example):
         if item['question'] != example['question']:
             shots.append(f'Question: {item["question"]}\nAnswer: {item["answer"]}\n')
 
-    system_prompt = shots[0]
+    system_prompt = SYSTEM_PROMPT + '\n' + shots[0]
 
     return {
         'prompt': [
@@ -93,32 +93,34 @@ def reward_rougelsum(completions, **kwargs):
     return [ rouge.compute(predictions=[r], references=[a])['rougeLsum'] for r, a in zip(responses, answers)]
 
 
-model_name = 'OpenLLM-France/Lucie-7B-Instruct'
+org_name = "OpenLLM-France"
+model_name = 'Lucie-7B-Instruct'
 output_dir = 'models'
-ft_model_name = 'Lucie-7B-GRPO-GSM8K'
+ft_model_name = f'{model_name}-GRPO-GSM8K'
+model_name = '/'.join([org_name, model_name])
 
 training_args = GRPOConfig(
     output_dir=output_dir,
-    run_name=ft_model_name,
+    run_name=ft_model_name + '-ROUGE-ONESHOT-INSTR-2EPOCH',
     learning_rate=5e-6,
     adam_beta1 = 0.9,
     adam_beta2 = 0.99,
     weight_decay = 0.1,
-    warmup_ratio = 0.1,
+    warmup_ratio = 0.05,
     lr_scheduler_type='cosine',
     bf16=True,
-    per_device_train_batch_size=1,
+    per_device_train_batch_size=16,
     gradient_accumulation_steps=4,
     num_generations=16,
     max_prompt_length=256,
     max_completion_length=200,
-    num_train_epochs=1,
+    num_train_epochs=2,
     save_steps=100,
     max_grad_norm=0.1,
     log_on_each_node=False,
-    report_to=[], #"wandb","tensorboard"],
+    report_to=["wandb"], #"tensorboard"],
     logging_steps=1,
-    use_vllm=True,
+    use_vllm=False,
     vllm_gpu_memory_utilization=.25,
     vllm_device='cuda:0',
     logging_dir = "./logs"
@@ -160,6 +162,9 @@ trainer = GRPOTrainer(
     processing_class=tokenizer,
     reward_funcs=gsm8k_reward_fn + [ logger, reward_rouge1, reward_rouge2, reward_rougel, reward_rougelsum ],
     args=training_args,
-    train_dataset=train_dataset
+    train_dataset=train_dataset,
+    peft_config=lora_config
 )
 trainer.train()
+trainer.save_model('models/')
+

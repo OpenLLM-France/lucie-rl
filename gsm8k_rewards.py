@@ -12,8 +12,8 @@ def all_numbers(s: str) -> list[str]:
 
 
 def extract_solution_str(s: str) -> str:
-    lines = re.split(r'\n', s.rstrip('\n').rstrip(' '))
-    mo = re.match(r'^####\s+([\-]?\d+([\,]\d+)*)\s*$', lines[-1])
+    lines = re.split(r'\n', s.rstrip(' ').rstrip('\n').rstrip(' '))
+    mo = re.match(r'^####\s+([\-]?\d+([\,]\d+)*)\s*', lines[-1])
     if mo is None:
         raise
     return mo.group(1).strip()
@@ -83,7 +83,7 @@ def reward_strict_correctness(completions, **kwargs):
     solutions = kwargs["solution"]  # Expected answers from kwargs
     responses = [completion[0]["content"] for completion in completions]
     extracted_responses = [extract_final_answer_int(r) for r in responses]
-    return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, solutions)]
+    return [10.0 if r == int(a.replace(',', '')) else 0.0 for r, a in zip(extracted_responses, solutions)]
 
 
 def reward_soft_correctness(completions, **kwargs):
