@@ -4,11 +4,18 @@ import json
 import torch
 import copy
 import random
-from datasets import load_dataset, Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-from trl import GRPOConfig, GRPOTrainer
-from gsm8k_rewards import gsm8k_reward_fn
+import torch
 import evaluate
+from datasets import load_dataset, Dataset
+
+from transformers import AutoTokenizer #, AutoModelForCausalLM, BitsAndBytesConfig
+from trl import GRPOConfig, GRPOTrainer
+
+from unsloth import FastLanguageModel, PatchFastRL
+PatchFastRL("GRPO", FastLanguageModel)
+from unsloth import is_bfloat16_supported
+
+from gsm8k_rewards import gsm8k_reward_fn
 
 
 SYSTEM_PROMPT = """
@@ -93,39 +100,6 @@ def reward_rougelsum(completions, **kwargs):
     return [ rouge.compute(predictions=[r], references=[a])['rougeLsum'] for r, a in zip(responses, answers)]
 
 
-org_name = "OpenLLM-France"
-model_name = 'Lucie-7B-Instruct'
-output_dir = 'models'
-ft_model_name = f'{model_name}-GRPO-GSM8K'
-model_name = '/'.join([org_name, model_name])
-
-training_args = GRPOConfig(
-    output_dir=output_dir,
-    run_name=ft_model_name + '-ROUGE-ONESHOT-INSTR-2EPOCH',
-    learning_rate=5e-6,
-    adam_beta1 = 0.9,
-    adam_beta2 = 0.99,
-    weight_decay = 0.1,
-    warmup_ratio = 0.05,
-    lr_scheduler_type='cosine',
-    bf16=True,
-    per_device_train_batch_size=16,
-    gradient_accumulation_steps=4,
-    num_generations=16,
-    max_prompt_length=256,
-    max_completion_length=200,
-    num_train_epochs=2,
-    save_steps=100,
-    max_grad_norm=0.1,
-    log_on_each_node=False,
-    report_to=["wandb"], #"tensorboard"],
-    logging_steps=1,
-    use_vllm=False,
-    vllm_gpu_memory_utilization=.25,
-    vllm_device='cuda:0',
-    logging_dir = "./logs"
-)
-
 #quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 #nf4_config = BitsAndBytesConfig(
 #           load_in_4bit=True,
@@ -134,37 +108,114 @@ training_args = GRPOConfig(
 #           bnb_4bit_compute_dtype=torch.bfloat16
 #)
 
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    attn_implementation="flash_attention_2",
-    torch_dtype="auto",
-    device_map="auto",
-    #quantization_config=nf4_config #quantization_config
-)
-from peft import LoraConfig, get_peft_model
+def load_model_unsloth(model_name, device_name, max_seq_length, lora_rank, use_quant):
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name = model_name,
+        max_seq_length = max_seq_length,
+        load_in_4bit = False, # False for LoRA 16bit
+        fast_inference = True, # Enable vLLM fast inference
+        max_lora_rank = lora_rank,
+        gpu_memory_utilization = 0.46, # Reduce if out of memory
+        #device_map={"": "cuda:1"}
+    )
 
-lora_config = LoraConfig(
-    task_type="CAUSAL_LM",
-    r=8,
-    lora_alpha=32,
-    lora_dropout=0.1,
-    target_modules=["q_proj", "v_proj"],
-)
+    if lora_rank is not None and lora_rank > 0:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r = lora_rank,
+            target_modules = [
+                "q_proj", "v_proj", "k_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ], # Remove QKVO if out of memory
+            lora_alpha = lora_rank,
+            use_gradient_checkpointing = "unsloth", # Enable long context finetuning
+            random_state = 3407,
+        )
 
-model = get_peft_model(model, lora_config)
+        # target_modules=["q_proj", "v_proj"],
 
-model.print_trainable_parameters()
+    # model, tokenizer, peft_config
+    return model, tokenizer, None
 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-trainer = GRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=gsm8k_reward_fn + [ logger, reward_rouge1, reward_rouge2, reward_rougel, reward_rougelsum ],
-    args=training_args,
-    train_dataset=train_dataset,
-    peft_config=lora_config
-)
-trainer.train()
-trainer.save_model('models/')
+def load_model_transformers(model_name, device_name, max_seq_length, lora_rank, use_quant):
+    #model = get_peft_model(model, lora_config)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # model, tokenizer, peft_config
+    return None, tokenizer, None
+
+
+
+def main(model_name, suffix, num_epochs, device_name, max_seq_length, lora_rank, num_generations, use_unsloth, use_quant):
+
+    if use_unsloth:
+        model, tokenizer, peft_config = load_model_unsloth(model_name, device_name, max_seq_length, lora_rank, use_quant)
+    else:
+        model, tokenizer, peft_config = load_model_transformers(model_name, device_name, max_seq_length, lora_rank, use_quant)
+
+    model.print_trainable_parameters()
+
+    training_args = GRPOConfig(
+        output_dir='models/',
+        run_name=model_name.split('/')[-1] + f'-{suffix}' + '-ROUGE-ONESHOT-INSTR-QKVOGUD-UNSLOTH',
+        learning_rate=5e-6,
+        adam_beta1 = 0.9,
+        adam_beta2 = 0.99,
+        weight_decay = 0.1,
+        warmup_ratio = 0.1,
+        lr_scheduler_type='cosine',
+        optim='paged_adamw_8bit',
+        bf16=True,
+        per_device_train_batch_size=num_generations,
+        gradient_accumulation_steps=4,
+        num_generations=num_generations,
+        max_prompt_length=256,
+        max_completion_length=200,
+        num_train_epochs=num_epochs,
+        save_steps=100,
+        max_grad_norm=0.1,
+        log_on_each_node=False,
+        report_to=["wandb"], #"tensorboard"],
+        logging_steps=1,
+        use_vllm=True,
+        vllm_gpu_memory_utilization=.5,
+        #vllm_device='cuda:1',
+        logging_dir = "./logs"
+    )
+
+    trainer = GRPOTrainer(
+        model=model,
+        processing_class=tokenizer,
+        reward_funcs=gsm8k_reward_fn + [ logger, reward_rouge2, reward_rougel ],
+        args=training_args,
+        train_dataset=train_dataset,
+        #peft_config=lora_config
+    )
+    trainer.train()
+    trainer.save_model('models/')
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--model', default='OpenLLM-France/Lucie-7B-Instruct', help='Model name or path')
+    parser.add_argument('-d', '--device', default='cuda', help='Device to use (cuda, cpu)')
+    parser.add_argument('-l', '--max-seq-len', default=2048, type=int, help='Max sequence length')
+    parser.add_argument('-r', '--lora-rank', default=0, type=int, help='LORA rank. 0 means no LORA. Suggested 8, 16, 32, 64, 128')
+    parser.add_argument('-g', '--num-generations', default=16, type=int, help='Number of generations in GRPO')
+    parser.add_argument('-q', '--quantize', default=None, help='Use quantization (possible values: None, 4, 8)')
+    parser.add_argument('-u', '--unsloth', default=True, action='store_true', help='Use Unsloth')
+    parser.add_argument('-s', '--suffix', default='fine-tuned', help='Fine-tuned model suffix')
+    parser.add_argument('-e', '--epoch', default=4, type=int, help='Training epochs')
+
+
+    args = parser.parse_args()
+
+    try:
+        main(args.model, args.suffix, args.epoch, args.device, args.max_seq_len, args.lora_rank, args.num_generations, args.unsloth, args.quantize)
+    except Exception as e:
+        sys.stderr.write(f'ERROR: {e}\n')
+
 
